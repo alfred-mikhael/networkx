@@ -294,3 +294,207 @@ def _add_edge_to_spanner(H, residual_graph, u, v, weight):
     H.add_edge(u, v)
     if weight:
         H[u][v][weight] = residual_graph[u][v]["weight"][0]
+
+
+def _nagamochi_ibaraki_certificate(G, k):
+    """Computes the Nagamochi-Ibaraki k-sparse spanning forest in `G`. This is
+    a maximal spanning forest `F` with at most `k * (n-1)` edges, such that
+    `F` contains all edges of `G` with edge connectivity less than or equal to
+    `k`.
+
+    Parameters
+    ----------
+    G : NetworkX Graph
+
+    k : int
+        The edge connectivity threshold such that all edges of `G` with edge
+        connectivity less than or equal to `k` will be in the returned forest.
+
+    Returns
+    -------
+    F : collection of edges
+        A spanning forest with at most `k * (n-1)` edges, such that all edges
+        of `G` which cross a cut of value at most `k` are included in `F`.
+    """
+    m = G.size()
+
+    node_buckets = {i: set() for i in range(m)}
+    node_buckets[0] = set(G)
+    node_labels = {v: 0 for v in G}
+    largest_label = 0
+
+    trees = [set()] * m
+    scanned_edges = set()
+
+    if G.is_multigraph():
+        # need edges with multiplicity
+        def edge_dict(u):
+            return G.edges(u, keys=True)
+    else:
+
+        def edge_dict(u):
+            return G.edges(u)
+
+    while node_buckets[largest_label] > 0:
+        u = node_buckets[largest_label].pop()
+        for e in edge_dict(u):
+            if e in scanned_edges:
+                continue
+            v = e[1]
+            trees[node_labels[v] + 1].add(e)
+            # increment label and move to new bucket
+            node_buckets[node_labels[v]].remove(v)
+            node_buckets[node_labels[v] + 1].add(v)
+            node_labels[v] += 1
+
+    return set.union(trees[i] for i in range(k))
+
+
+def _contract_all_but(G, E):
+    """Contracts all edges of `G` except for those in `E`, and returns the
+    contracted graph.
+
+    Parameters
+    ----------
+    G : NetworkX Graph
+
+    E : collection
+        Collection of edges to avoid contracting
+
+    Returns
+    -------
+    NetworkX Graph
+        A graph with all edges of `G` contracted, except for those in `E`.
+    """
+    H = G.__class__()
+    G.remove_edges_from(E)
+    components = list(nx.connected_components(G))
+    num_components = len(components)
+    node_images = {v: i for i in range(num_components) for v in components[i]}
+    # restore G
+    G.add_edges_from(E)
+    H.add_nodes_from(i for i in range(num_components))
+    for e in E:
+        # can't unpack as u, v = e because there may or may not be a key,
+        # depending on whether G is a multigraph or not
+        u = e[0]
+        v = e[1]
+        H.add_edge(node_images(u), node_images(v))
+    return H
+
+
+def _sparse_partition(G, k):
+    """Compute a `k`-sparse partition of `G`. A `k`-sparse partition is a set
+    of edges `E` such that all edges with connectivity at most `k` are in `E`
+    and if `G - E` has `r` connected components, then `E` has at most
+    `2 * r * (n-1)` edges.
+    """
+    if G.size() <= 2 * k * (G.number_of_nodes() - 1):
+        return G.edges(keys=True) if G.is_multigraph() else G.edges()
+
+    to_remove = _nagamochi_ibaraki_certificate(G, k)
+    H = _contract_all_but(G, to_remove)
+    return _sparse_partition(H, k)
+
+
+def _weak_edges(G, k):
+    """Compute all edges in `G` which have strong connectivity no more than
+    `2k`.
+    """
+    n = G.number_of_nodes()
+    weak_edges = set()
+    for _ in range(math.ceil(math.log2(n))):
+        E = _sparse_partition(G, 2 * k)
+        # exit early if there are no more edges to remove
+        if len(E) == 0:
+            break
+        G.remove_edges_from(E)
+        weak_edges.update(E)
+    # restore G
+    G.add_edges_from(weak_edges)
+    return weak_edges
+
+
+def _estimate_strong_connectivities(G):
+    """Estimates the strong connectivity of each edge in `G` up to a factor
+    of 2, such that for any edge e with strong connectivity k, the estimate
+    for edge e is between k/2 and k.
+    """
+    m = G.size()
+    edge_connectivities = {e: 1 for e in G.edges()}
+    if G.is_multigraph():
+        edge_connectivities = {e: 1 for e in G.edges(keys=True)}
+    removed = set()
+    connectivity = 1
+
+    def estimation(C, k):
+        E = _weak_edges(C, 2 * k)
+        G.remove_edges_from(E)
+        removed.update(E)
+        for e in E:
+            edge_connectivities[e] = k
+
+    while connectivity <= m:
+        for c in nx.connected_components(G):
+            if len(c) > 1:
+                estimation(G.subgraph(c), connectivity)
+        connectivity *= 2
+
+    G.add_edges_from(removed)
+    return edge_connectivities
+
+
+@not_implemented_for("directed")
+@py_random_state(3)
+def cut_sparsifier(G, epsilon, seed=None):
+    r"""Returns a $1 \pm \epsilon$ cut sparsifier of a graph `G` with n nodes,
+    such that at most the returned graph has at most `30 n ln n / epsilon ** 2`
+    edge with probability at least `1 - 1/n`.
+
+    Parameters
+    ----------
+    G : NetworkX Graph
+
+    epsilon : float
+        The quality of the cut approximator. If a cut in `G` has value `k`,
+        then the same cut in the returned graph will have value between
+        `(1-epsilon) * k` and `(1 + epsilon) * k`.
+
+    seed : integer, random_state, or None (default)
+        Indicator of random number generation state.
+        See :ref:`Randomness<randomness>`.
+
+    Returns
+    -------
+    H : NetworkX Graph or MultiGraph
+        A weighted graph or multigraph which is a sparse $1 \pm \epsilon$
+        cut-approximator of `G`.
+
+    Raises
+    ------
+    NetworkXError
+        If the input graph has less than `30 n ln n / epsilon ** 2` edges.
+
+    ValueError
+        If `epsilon` is not positive.
+    """
+    n = G.number_of_nodes()
+
+    if G.size() < 30 * n * math.log(n) / epsilon**2:
+        raise nx.NetworkXError("The input graph is already sparse.")
+    if epsilon <= 0:
+        raise ValueError("epsilon must be positive.")
+
+    rho = 15 * math.log(n) / epsilon**2
+    connectivities = _estimate_strong_connectivities(G)
+
+    H = G.__class__()
+    H.add_nodes_from(G)
+    edge_iter = G.edges(keys=True) if G.is_multigraph() else G.edges()
+    for e in edge_iter:
+        p = min(1, rho / connectivities[e])
+        u = e[0]
+        v = e[1]
+        if seed.random() < p:
+            H.add_edge(u, v, weight=connectivities[e])
+    return H
