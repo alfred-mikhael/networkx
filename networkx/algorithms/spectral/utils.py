@@ -2,8 +2,9 @@
 Utility classes and functions for cut finding algorithms.
 """
 
+from hashlib import md5
+
 import networkx as nx
-from networkx.utils import py_random_state
 
 __all__ = [
     "generate_random_orthogonal_gaussian",
@@ -12,8 +13,6 @@ __all__ = [
     "compute_mincut",
     "build_subdivision_graph",
 ]
-
-py_random_state("_seed")
 
 
 def generate_random_orthogonal_gaussian(dim, quantity, _seed=None):
@@ -189,14 +188,12 @@ def flow_matching(R, _s, _t):
 
 
 def compute_mincut(R, _t):
-    """Computes the min-cut in R. Always returns the smaller side of the cut first."""
+    """Computes the min-cut in R. Always returns the source side of the cut first."""
     cutset = [(u, v, d) for u, v, d in R.edges(data=True) if d["flow"] == d["capacity"]]
     R.remove_edges_from(cutset)
 
     non_reachable = set(nx.shortest_path_length(R, target=_t))
-    partition = (non_reachable, set(R) - non_reachable)
-    if len(non_reachable) >= len(R) // 2:
-        partition = (set(R) - non_reachable, non_reachable)
+    partition = (set(R) - non_reachable, non_reachable)
     R.add_edges_from(cutset)
     return partition
 
@@ -210,8 +207,9 @@ def build_subdivision_graph(G, subdiv_node_format=None):
     G : NetworkX Graph
 
     subdidv_node_format : function
-        Takes two arguments u, v and returns the key for the subdivision node of the edge (u, v).
-        If not specified, the default key is f"{str(u)} - {str(v)}".
+        Takes two arguments u, v and an optional third argument k, and returns the key for the
+        subdivision node of the edge (u, v). If not specified, the default key is
+        the md5 hash of str(u) + '-' + str(v) + '-' + str(k).
 
     Returns
     -------
@@ -229,8 +227,9 @@ def build_subdivision_graph(G, subdiv_node_format=None):
     """
     if not subdiv_node_format:
 
-        def default_subdiv_format(u, v):
-            return f"{str(u)} - {str(v)}"
+        def default_subdiv_format(u, v, k):
+            hash_string = str(u) + "-" + str(v) + "-" + str(k)
+            return md5(hash_string.encode("utf-8")).hexdigest()
 
         subdiv_node_format = default_subdiv_format
     if not callable(subdiv_node_format):
@@ -238,9 +237,16 @@ def build_subdivision_graph(G, subdiv_node_format=None):
     H = nx.Graph()
     H.add_nodes_from(G.nodes())
     subdiv_nodes = set()
-    for u, v in G.edges():
-        subdivision_vertex = subdiv_node_format(u, v)
-        H.add_edge(u, subdivision_vertex)
-        H.add_edge(subdivision_vertex, v)
-        subdiv_nodes.add(subdivision_vertex)
+    if G.is_multigraph():
+        for i, u, v, k in enumerate(G.edges(keys=True)):
+            subdivision_vertex = subdiv_node_format(u, v, f"{i}:{k}")
+            H.add_edge(u, subdivision_vertex)
+            H.add_edge(subdivision_vertex, v)
+            subdiv_nodes.add(subdivision_vertex)
+    else:
+        for i, u, v in enumerate(G.edges()):
+            subdivision_vertex = subdiv_node_format(u, v, i)
+            H.add_edge(u, subdivision_vertex)
+            H.add_edge(subdivision_vertex, v)
+            subdiv_nodes.add(subdivision_vertex)
     return H, subdiv_nodes

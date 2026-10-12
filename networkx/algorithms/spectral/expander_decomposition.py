@@ -8,7 +8,7 @@ import networkx as nx
 from networkx import set_edge_attributes
 from networkx.algorithms.flow import preflow_push
 from networkx.algorithms.spectral.low_conductance_cut import lowest_conductance_cut
-from networkx.utils.decorators import not_implemented_for
+from networkx.utils.decorators import not_implemented_for, np_random_state
 
 from .utils import compute_mincut
 
@@ -59,21 +59,34 @@ def max_flow_trimming(G, A, alpha, _s, _t, flow_func=None, **kwargs):
     H.add_node(_s)
     H.add_node(_t)
     for u in H:
-        supply = G.degree(u) - H.degree(u)
+        if u in {_s, _t}:
+            continue
+        supply = 2 * (G.degree(u) - H.degree(u)) / alpha
         total_flow += supply
         H.add_edge(_s, u, capacity=supply)
-        H.add_edge(u, _t, capacity=H.degree(u))
+        H.add_edge(u, _t, capacity=G.degree(u))
 
     # solve the flow
-    R = preflow_push(H, _s, _t, **kwargs)
+    R = flow_func(H, _s, _t, **kwargs)
     if R.graph["flow_value"] < total_flow:
-        return compute_mincut(R, _t)
-    return set(), set(G)
+        left, right = compute_mincut(R, _t)
+        left.remove(_s)
+        right.remove(_t)
+        return left, right
+    return set(), set(A)
 
 
-@not_implemented_for("directed")
+@not_implemented_for(["directed", "multigraph"])
+@np_random_state("_seed")
 def expander_decomposition(
-    G, alpha, _s, _t, max_flow_trimming=True, trimming_kwargs=None, **kwargs
+    G,
+    alpha,
+    _s,
+    _t,
+    flow_func=preflow_push,
+    trimming_kwargs={},
+    _seed=None,
+    **kwargs,
 ):
     r"""Given a graph `G` with `n` nodes and `m` edges, and a conductance parameter
     `alpha`, finds with high probability a partition such that each cluster is
@@ -99,12 +112,14 @@ def expander_decomposition(
         A key for a super-sink node added during flow computations. Must satisfy
         `_t not in G`.
 
-    max_flow_trimming : bool
-        Whether to use exact max flow or approximate max flow for trimming. Currently
-        only exact max flow trimming is supported. This is also usually faster.
+    flow_func : function
+        A function which computes the max flow in a graph. Defaults to `meth:preflow_push`
 
     trimming_kwargs : dict
         A dictionary of keyword arguments to be passed to the trimming function
+
+    _seed : int or None
+        A seed for the random number generator.
 
     kwargs : Any keyword argument to be passed to the lowest_conductance_cut function.
             This includes a _seed argument to control the RNG.
@@ -136,16 +151,13 @@ def expander_decomposition(
     .. [3] Isaac Arvestad. Near-linear Time Expander Decomposition in Practice.
             Master's thesis, KTH Royal Institute of Technology, 2022.
     """
-    if max_flow_trimming:
-        trimming_func = max_flow_trimming
-    else:
-        raise nx.NetworkXNotImplemented(
-            "Near linear time trimming is not supported yet."
-        )
+    trimming_func = max_flow_trimming
 
     def expander_decomposition_impl(H, alpha, _s, _t, **kwargs):
         m = len(H.edges())
-        S, T = lowest_conductance_cut(H, 6 * alpha, _s, _t, **kwargs)
+        S, T = lowest_conductance_cut(
+            H, 6 * alpha, _s, _t, flow_func=flow_func, _seed=_seed, **kwargs
+        )
         if len(S) == 0:
             # certified that G is an 6 * alpha expander, return set(G).
             return [T]
@@ -161,7 +173,9 @@ def expander_decomposition(
         else:
             # unbalanced cut gives near expander. Trim and recurse on one
             # side only.
-            trimmed, expander = trimming_func(G, T, alpha, _s, _t, **trimming_kwargs)
+            trimmed, expander = trimming_func(
+                H, T, 6 * alpha, _s, _t, flow_func, **trimming_kwargs
+            )
             trimmed = trimmed.union(S)
             return [expander] + expander_decomposition_impl(
                 G.subgraph(trimmed), alpha, _s, _t, **kwargs

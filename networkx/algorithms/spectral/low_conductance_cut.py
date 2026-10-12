@@ -5,7 +5,7 @@ Implementation of the RST cut matching algorithm for finding a cut of low conduc
 import math
 
 import networkx as nx
-from networkx.utils.decorators import not_implemented_for
+from networkx.utils.decorators import not_implemented_for, np_random_state
 
 from .utils import (
     build_flow_network,
@@ -94,11 +94,11 @@ def lowest_conductance_cut_impl(
                 L.append(v)
             else:
                 R.append(v)
-            if len(L) > len(R):
-                temp = L
-                L = R
-                R = temp
-                should_reverse = True
+        if len(L) > len(R):
+            temp = L
+            L = R
+            R = temp
+            should_reverse = True
         return L, R, should_reverse
 
     def propose_cut(proj_flow_vector, strategy):
@@ -180,6 +180,8 @@ def lowest_conductance_cut_impl(
             # Flow was not routable. Compute a cut and remove the cut
             # from the set of active subdiv nodes.
             Q, S = compute_mincut(R, _t)
+            if len(Q) > len(S):
+                Q, S = S, Q
             C.update(Q)
             cut_volume += sum(
                 subdivision_graph.degree[v] for v in Q if v not in {_s, _t}
@@ -223,6 +225,7 @@ def lowest_conductance_cut_impl(
 
 
 @not_implemented_for("directed")
+@np_random_state("_seed")
 def lowest_conductance_cut(
     G,
     alpha,
